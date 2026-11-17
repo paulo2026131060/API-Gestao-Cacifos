@@ -1,13 +1,14 @@
+import os
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = (
-    "postgresql+psycopg2://postgres:haha12@localhost:5432/cacifos-db"
-)
-engine = create_engine(DATABASE_URL)
+load_dotenv()  # lê o ficheiro .env
 
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,   # testa a ligação antes de usar (a Neon fecha ligações paradas)
+    pool_recycle=300,     # renova as ligações a cada 5 minutos
 )
