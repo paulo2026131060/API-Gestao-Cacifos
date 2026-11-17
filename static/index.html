@@ -3,24 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pedido de Cacifo</title>
+  <title>Pedido de Material</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: system-ui, sans-serif; background: #f2f4f7; margin: 0; display: grid; place-items: center; min-height: 100vh; }
-    form { background: #fff; padding: 2rem; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.1); width: min(420px, 92vw); }
-    h1 { margin-top: 0; font-size: 1.4rem; }
+    /* Cores e fonte do site da UNIPS (unips.pt) */
+    :root { --teal: #009697; --teal-dark: #1e8285; --ink: #383f51; --bg: #f3f4f7; --muted: #69727d; }
+    * { box-sizing: border-box; }
+    body { font-family: "Barlow", system-ui, sans-serif; color: var(--ink); background: var(--bg); margin: 0; min-height: 100vh; display: flex; flex-direction: column; }
+    header { background: var(--teal); padding: 1rem; text-align: center; }
+    header img { height: 56px; max-width: 90%; }
+    main { flex: 1; display: grid; place-items: center; padding: 2rem 1rem; }
+    form { background: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 12px rgba(56,63,81,.12); width: min(440px, 100%); }
+    h1 { margin-top: 0; font-size: 1.6rem; color: var(--teal-dark); }
     label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
-    input, textarea { width: 100%; padding: .6rem; border: 1px solid #ccd; border-radius: 6px; font: inherit; box-sizing: border-box; }
-    button { margin-top: 1.2rem; width: 100%; padding: .7rem; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 1rem; cursor: pointer; }
+    input, textarea { width: 100%; padding: .6rem; border: 1px solid #c9ced6; border-radius: 4px; font: inherit; color: var(--ink); }
+    input:focus, textarea:focus { outline: 2px solid var(--teal); border-color: var(--teal); }
+    button { margin-top: 1.4rem; width: 100%; padding: .75rem; border: 0; border-radius: 4px; background: var(--teal-dark); color: #fff; font: inherit; font-weight: 700; font-size: 1.05rem; cursor: pointer; }
+    button:hover { background: var(--teal); }
     button:disabled { opacity: .6; cursor: wait; }
-    #msg { margin-top: 1rem; text-align: center; }
-    .ok { color: #15803d; } .erro { color: #b91c1c; }
+    #msg { margin-top: 1rem; text-align: center; font-weight: 600; }
+    footer { background: rgba(105,114,125,.18); color: var(--ink); text-align: center; font-size: .9rem; padding: .9rem 1rem; }
+    .ok { color: #2e7d32; } .erro { color: #c62828; }
   </style>
 </head>
 <body>
+  <header>
+    <img src="/static/logo-unips.svg" alt="Universidade Politécnica de Setúbal">
+  </header>
+  <main>
   <form id="form">
-    <h1>Pedido de Cacifo</h1>
+    <h1>Pedido de Material</h1>
     <label for="aluno">Nome do aluno</label>
-    <input id="aluno" name="aluno" maxlength="100" required>
+    <input id="aluno" name="aluno" maxlength="100" pattern="\D+" title="O nome não pode ter números" required>
     <label for="numero">Número do aluno</label>
     <input id="numero" name="numero" inputmode="numeric" pattern="[0-9]+" maxlength="20" required>
     <label for="material">Material que pretende</label>
@@ -28,6 +43,9 @@
     <button type="submit">Enviar pedido</button>
     <div id="msg"></div>
   </form>
+  </main>
+
+  <footer>Smart Lockers · Paulo Freitas 2026131060 &amp; Fabrício Santana 2026124995 · UNIPS 2026/2027</footer>
 
   <script>
     const form = document.getElementById("form");
@@ -51,7 +69,7 @@
         if (!resp.ok) throw new Error();
         const pedido = await resp.json();
         msg.className = "ok";
-        msg.textContent = `Pedido nº ${pedido.id} enviado! Estado: ${pedido.status}.`;
+        msg.textContent = "Pedido enviado! Um gestor entrará em contacto brevemente.";
         form.reset();
       } catch {
         msg.className = "erro";

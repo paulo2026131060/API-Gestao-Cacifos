@@ -18,6 +18,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -37,6 +38,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Locker Management API", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 @app.get("/", include_in_schema=False)
@@ -46,7 +48,7 @@ def form_page():
 
 
 class NewRequest(BaseModel):
-    student: str = Field(min_length=1, max_length=100)
+    student: str = Field(min_length=1, max_length=100, pattern=r"^\D+$")   # no digits
     student_number: str = Field(min_length=1, max_length=20, pattern=r"^[0-9]+$")
     material: str = Field(min_length=1, max_length=500)
 
@@ -426,7 +428,7 @@ def process_uplink(data: dict):
 
     return {"success": True}
 
-
+#Teste para fazer um uplink simulado sem o XIAO, para testar a API:
 @app.post("/uplink")
 def receive_uplink(data: dict):
     return process_uplink(data)

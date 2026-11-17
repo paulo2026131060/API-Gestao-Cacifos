@@ -133,8 +133,9 @@ void iniciarLoRaWAN() {
   if (state == RADIOLIB_LORAWAN_NEW_SESSION || state == RADIOLIB_ERR_NONE) {
     escrever("Sessão ABP ativa: pronto a enviar (sem join).");
     node.setADR(false);                 // desliga o ajuste automático
-    int dr = node.setDatarate(1);       // DR2 = SF10: mais alcance
-    Serial.print("setDatarate(1) = ");
+    int dr = node.setDatarate(1);       // Casa (longe do gateway) SF11 (~659 ms no ar)
+    //int dr = node.setDatarate(5);       // Universidade (perto do gateway) SF7 (~50 ms no ar)
+    Serial.print("setDatarate = ");
     Serial.println(dr);                 // 0 = aceite
     Serial.print("DevAddr em uso: 0x");
     Serial.println(node.getDevAddr(), HEX);

@@ -143,11 +143,12 @@ function decodeUplink(input) {
 API-Gestão-Cacifos/
 ├── .venv/
 ├── .env            ← DATABASE_URL (e TTN_API_KEY); não vai para o Git
-├── database.py     ← ligação à Neon (SQLAlchemy)
+├── database/       ← tudo o que é da base de dados
+│   ├── connection.py ← ligação à Neon (SQLAlchemy)
+│   ├── schema.sql    ← tabelas lockers, students, requests e events
+│   └── teste_db.py   ← teste rápido da ligação
 ├── main.py         ← endpoints + process_uplink
 ├── mqtt_ttn.py     ← cliente MQTT do TTN
-├── schema.sql      ← tabelas lockers, students, requests e events
-├── teste_db.py     ← teste rápido da ligação à base de dados
 └── requirements.txt
 ```
 
@@ -209,6 +210,12 @@ Respostas de erro:
 
 Documentação automática e testes: `http://localhost:8000/docs` (botão **Try it out**).
 
+### Formulário do aluno
+
+Com a API a correr, o formulário abre em **`http://localhost:8000/`** (ficheiro `static/index.html`,
+servido pela própria API). Pede nome, número do aluno e material, e envia `POST /api/requests`.
+Noutro dispositivo da mesma rede, usar `http://<IP-do-PC>:8000/`.
+
 ### Integração MQTT com o TTN (publish/subscribe)
 
 O TTN tem um broker MQTT próprio. A API liga-se como **subscriber**:
@@ -238,9 +245,9 @@ base de dados da mesma forma. O cacifo é identificado pelo `dev_eui`.
    DATABASE_URL=postgresql+psycopg://utilizador:password@ep-xxxx.neon.tech/neondb?sslmode=require
    ```
 
-3. `database.py` carrega o `.env` e cria o engine com `pool_pre_ping=True` e `pool_recycle=300`
+3. `database/connection.py` carrega o `.env` e cria o engine com `pool_pre_ping=True` e `pool_recycle=300`
    (a Neon fecha ligações paradas).
-4. Criar as tabelas uma única vez com o conteúdo de `schema.sql` no **SQL Editor** da Neon.
+4. Criar as tabelas uma única vez com o conteúdo de `database/schema.sql` no **SQL Editor** da Neon.
 5. Associar o cacifo ao dispositivo:
 
    ```sql
@@ -261,7 +268,7 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 
 ## 7. Testes sem o XIAO
 
-1. **Ligação à base de dados:** `python teste_db.py` → `Ligado à base de dados!` + contagens.
+1. **Ligação à base de dados:** `python -m database.teste_db` → `Ligado à base de dados!` + contagens.
 2. **API → Neon:** com a API a correr, noutro terminal:
 
    ```powershell
