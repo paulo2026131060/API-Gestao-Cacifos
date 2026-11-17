@@ -4,4 +4,4 @@ __pycache__/
 *.db
 *.sqlite3
 .env
-cacifo_lorawan_abp.ino
+secrets.h
