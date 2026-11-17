@@ -36,6 +36,7 @@ def iniciar_mqtt(processar_uplink):
     def ao_receber(cliente, userdata, msg):
         try:
             dados = json.loads(msg.payload)
+            print(json.dumps(dados, indent=2), flush=True)
             # Ignora mensagens sem dados da aplicação (ex.: só comandos MAC)
             if "decoded_payload" not in dados.get("uplink_message", {}):
                 return

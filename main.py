@@ -1,4 +1,7 @@
 # python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# Simular um uplink do TTN (The Things Network) para teste da API sem eu ter o XIAO comigo:
+# Invoke-RestMethod -Uri http://localhost:8000/uplink -Method Post -ContentType "application/json" -Body '{"end_device_ids":{"device_id":"cacifo-01-abp","dev_eui":"70B3D57ED0079EC6"},"uplink_message":{"decoded_payload":{"porta":"ABERTA","trinco":"DESTRANCADO","alerta":false,"ocupado":false}}}'
 from contextlib import asynccontextmanager
 from datetime import datetime
 
