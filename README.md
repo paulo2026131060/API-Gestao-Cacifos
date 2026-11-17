@@ -144,9 +144,9 @@ API-Gestão-Cacifos/
 ├── .venv/
 ├── .env            ← DATABASE_URL (e TTN_API_KEY); não vai para o Git
 ├── database.py     ← ligação à Neon (SQLAlchemy)
-├── main.py         ← endpoints + processar_uplink
+├── main.py         ← endpoints + process_uplink
 ├── mqtt_ttn.py     ← cliente MQTT do TTN
-├── schema.sql      ← tabelas cacifos e pedidos
+├── schema.sql      ← tabelas lockers, students, requests e events
 ├── teste_db.py     ← teste rápido da ligação à base de dados
 └── requirements.txt
 ```
@@ -162,20 +162,52 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 Arrancar sempre com `python -m uvicorn` e confirmar no terminal a linha
 `[MQTT] Ligado ao TTN. A subscrever os uplinks...`.
 
+### Estados do pedido
+
+```
+Pending ──► Approved ──► Deposited ──► Collected
+    │
+    └──────► Rejected
+```
+
+| Transição | Quem | Regra |
+|---|---|---|
+| — → Pending | Website (aluno) | O pedido é sempre criado como Pending |
+| Pending → Approved / Rejected | Gestor (app) | Só a partir de Pending |
+| Approved → Deposited | Gestor (app) ou sensores | Tem de ter cacifo atribuído |
+| Deposited → Collected | Gestor (app) ou sensores | Liberta o cacifo; o `locker_id` fica no pedido como histórico |
+
+- Só pedidos **Approved** recebem, trocam ou perdem cacifo.
+- **Rejected** e **Collected** são estados finais.
+- A atribuição de cacifo é **atómica** (`UPDATE ... WHERE occupied = false`): dois gestores nunca ficam com o mesmo cacifo.
+
 ### Endpoints
 
 | Método | Caminho | Função |
 |---|---|---|
-| GET | `/api/dashboard` | Contadores (pendentes, preparados, aprovados, cacifos livres/ocupados) |
-| GET | `/api/pedidos?estado=` | Lista de pedidos, filtrada por estado |
-| GET | `/api/pedidos/{id}` | Detalhe de um pedido |
-| PUT | `/api/pedidos/{id}/aprovar` · `/rejeitar` · `/preparado` | Muda o estado do pedido |
-| GET | `/api/cacifos` | Cacifos livres |
-| PUT | `/api/pedidos/{id}/cacifo/{cacifo_id}` | Associa um cacifo ao pedido |
-| PUT | `/api/pedidos/{id}/desassociar` | Liberta o cacifo do pedido |
+| GET | `/api/dashboard` | Contadores: pendentes, aprovados, aprovados sem cacifo, depositados, cacifos livres, ocupados e com alerta |
+| GET | `/api/requests?status=&search=` | Lista de pedidos (mais antigos primeiro), com filtro por estado e pesquisa por aluno ou nº |
+| POST | `/api/requests` | Cria um pedido (website). Corpo: `{"student": "...", "student_number": "12345", "material": "..."}` |
+| GET | `/api/requests/{id}` | Detalhe do pedido, com o estado do cacifo atribuído |
+| PUT | `/api/requests/{id}/approve` · `/reject` | Pending → Approved / Rejected |
+| PUT | `/api/requests/{id}/deposited` | Approved (com cacifo) → Deposited |
+| PUT | `/api/requests/{id}/collected` | Deposited → Collected (liberta o cacifo) |
+| PUT | `/api/requests/{id}/locker/{locker_id}` | Atribui ou troca o cacifo de um pedido Approved |
+| PUT | `/api/requests/{id}/unassign` | Retira o cacifo de um pedido Approved |
+| GET | `/api/lockers?status=free\|occupied\|alert` | Todos os cacifos, com estado do hardware e pedido/aluno ativo |
+| GET | `/api/lockers/free` | Cacifos livres (diálogo "Atribuir cacifo") |
+| GET | `/api/lockers/{id}` | Detalhe do cacifo, com os últimos 10 pedidos |
 | POST | `/uplink` | Recebe um evento do cacifo (modo Wi-Fi ou testes) |
 
-Documentação automática: `http://localhost:8000/docs`.
+Respostas de erro:
+
+| Código | Significado |
+|---|---|
+| 404 | Pedido ou cacifo não existe |
+| 409 | Ação impossível no estado atual (ex.: aprovar um pedido já Rejected, cacifo já ocupado) |
+| 422 | Dados inválidos (ex.: estado desconhecido no filtro, campos em falta no POST) |
+
+Documentação automática e testes: `http://localhost:8000/docs` (botão **Try it out**).
 
 ### Integração MQTT com o TTN (publish/subscribe)
 
@@ -189,10 +221,10 @@ O TTN tem um broker MQTT próprio. A API liga-se como **subscriber**:
 Fluxo de uma mensagem:
 
 ```
-TTN publica → paho-mqtt → ao_receber() [mqtt_ttn.py] → processar_uplink() [main.py] → UPDATE na Neon
+TTN publica → paho-mqtt → ao_receber() [mqtt_ttn.py] → process_uplink() [main.py] → UPDATE na Neon
 ```
 
-O endpoint `/uplink` usa a mesma função `processar_uplink`, por isso Wi-Fi e LoRaWAN atualizam a
+O endpoint `/uplink` usa a mesma função `process_uplink`, por isso Wi-Fi e LoRaWAN atualizam a
 base de dados da mesma forma. O cacifo é identificado pelo `dev_eui`.
 
 ---
@@ -212,16 +244,18 @@ base de dados da mesma forma. O cacifo é identificado pelo `dev_eui`.
 5. Associar o cacifo ao dispositivo:
 
    ```sql
-   UPDATE cacifos SET dev_eui = '<DevEUI do dispositivo>' WHERE id = 1;
+   UPDATE lockers SET dev_eui = '<DevEUI do dispositivo>' WHERE id = 1;
    ```
 
 Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` para `postgresql://`).
 
 ### Tabelas
 
-- **cacifos**: `id`, `ocupado` (atribuído a um pedido), `porta_aberta`, `trancado`,
-  `tem_encomenda` (sensor físico), `alerta`, `dev_eui`, `ultima_comunicacao`.
-- **pedidos**: `id`, `aluno`, `material`, `estado`, `cacifo_id`, `criado_em`.
+- **lockers**: `id`, `occupied` (atribuído a um pedido), `door_open`, `locked`,
+  `has_item` (sensor físico), `alert`, `dev_eui`, `last_communication`.
+- **requests**: `id`, `student`, `student_number`, `material`, `status`, `locker_id`, `created_at`.
+- **students**: `id`, `student_number`, `name`, `nfc_uid`.
+- **events**: `id`, `request_id`, `description`, `event_date`.
 
 ---
 
@@ -234,7 +268,7 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
    Invoke-RestMethod -Uri http://localhost:8000/uplink -Method Post -ContentType "application/json" -Body '{"end_device_ids":{"device_id":"cacifo-01-abp","dev_eui":"<DevEUI>"},"uplink_message":{"decoded_payload":{"porta":"ABERTA","trinco":"DESTRANCADO","alerta":false,"ocupado":false}}}'
    ```
 
-   Confirmar na Neon: `SELECT id, porta_aberta, trancado, ultima_comunicacao FROM cacifos WHERE id = 1;`
+   Confirmar na Neon: `SELECT id, door_open, locked, last_communication FROM lockers WHERE id = 1;`
 3. **TTN → MQTT → API → Neon:** no TTN, `cacifo-01-abp` → **Messaging → Simulate uplink**,
    FPort `1`, payload `03` ou `00`.
 
@@ -260,8 +294,10 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 
 ## 9. Próximos passos
 
-- [ ] `GET /api/cacifos` devolver todos os cacifos com estado do hardware (para a app Android).
+- [x] `GET /api/lockers` devolver todos os cacifos com estado do hardware (para a app Android).
+- [x] Estados finais do pedido e endpoints `POST /api/requests`, `/deposited`, `/collected`.
 - [ ] App Android: Home, lista e detalhe de pedidos e cacifos.
+- [x] Website com o formulário do aluno (usa `POST /api/requests`).
 - [ ] Downlink a partir da app (destrancar cacifo via TTN), testado perto da universidade.
 - [ ] Regras automáticas: atualizar o estado do pedido (Depositado/Levantado) a partir dos eventos.
 - [ ] Sensor de ocupação (HC-SR04) e leitor NFC (PN532).

@@ -6,6 +6,6 @@ with engine.connect() as conn:
     print("Ligado à base de dados!")
     print(versao)
 
-    cacifos = conn.execute(text("SELECT COUNT(*) FROM cacifos")).scalar()
-    pedidos = conn.execute(text("SELECT COUNT(*) FROM pedidos")).scalar()
-    print(f"Cacifos: {cacifos} | Pedidos: {pedidos}")
+    lockers = conn.execute(text("SELECT COUNT(*) FROM lockers")).scalar()
+    requests = conn.execute(text("SELECT COUNT(*) FROM requests")).scalar()
+    print(f"Lockers: {lockers} | Requests: {requests}")
