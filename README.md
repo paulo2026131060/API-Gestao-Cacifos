@@ -190,6 +190,7 @@ Pending ──► Approved ──► Deposited ──► Collected
 | GET | `/api/requests?status=&search=` | Lista de pedidos (mais antigos primeiro), com filtro por estado e pesquisa por aluno ou nº |
 | POST | `/api/requests` | Cria um pedido (website). Corpo: `{"student": "...", "student_number": "12345", "material": "..."}` |
 | GET | `/api/requests/{id}` | Detalhe do pedido, com o estado do cacifo atribuído |
+| GET | `/api/requests/{id}/events` | Histórico do pedido (mais antigo primeiro) |
 | PUT | `/api/requests/{id}/approve` · `/reject` | Pending → Approved / Rejected |
 | PUT | `/api/requests/{id}/deposited` | Approved (com cacifo) → Deposited |
 | PUT | `/api/requests/{id}/collected` | Deposited → Collected (liberta o cacifo) |
@@ -198,6 +199,7 @@ Pending ──► Approved ──► Deposited ──► Collected
 | GET | `/api/lockers?status=free\|occupied\|alert` | Todos os cacifos, com estado do hardware e pedido/aluno ativo |
 | GET | `/api/lockers/free` | Cacifos livres (diálogo "Atribuir cacifo") |
 | GET | `/api/lockers/{id}` | Detalhe do cacifo, com os últimos 10 pedidos |
+| GET | `/api/lockers/{id}/events?limit=50` | Histórico do cacifo: ações do gestor e eventos do sensor (mais recente primeiro) |
 | POST | `/uplink` | Recebe um evento do cacifo (modo Wi-Fi ou testes) |
 
 Respostas de erro:
@@ -209,6 +211,27 @@ Respostas de erro:
 | 422 | Dados inválidos (ex.: estado desconhecido no filtro, campos em falta no POST) |
 
 Documentação automática e testes: `http://localhost:8000/docs` (botão **Try it out**).
+
+### Autenticação do gestor (chave de API)
+
+Todos os endpoints `/api/...` exigem o cabeçalho `X-API-Key`, **exceto** `POST /api/requests`
+(formulário do aluno). O formulário (`/`) e o `/uplink` também ficam abertos.
+
+- A chave está no `.env`: `MANAGER_API_KEY=...` (gerar uma nova com
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+- Sem chave ou com chave errada → **401**; se o servidor não tiver a chave configurada → **503**.
+- Em `/docs`, carregar em **Authorize** e colar a chave.
+- Na app Android (Retrofit/OkHttp), juntar o cabeçalho a todos os pedidos com um interceptor:
+
+  ```kotlin
+  val client = OkHttpClient.Builder()
+      .addInterceptor { chain ->
+          chain.proceed(chain.request().newBuilder()
+              .header("X-API-Key", BuildConfig.MANAGER_API_KEY)
+              .build())
+      }
+      .build()
+  ```
 
 ### Formulário do aluno
 
@@ -262,7 +285,11 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
   `has_item` (sensor físico), `alert`, `dev_eui`, `last_communication`.
 - **requests**: `id`, `student`, `student_number`, `material`, `status`, `locker_id`, `created_at`.
 - **students**: `id`, `student_number`, `name`, `nfc_uid`.
-- **events**: `id`, `request_id`, `description`, `event_date`.
+- **events** (histórico, gravado pela API): `id`, `event_date`, `event_type` (`request_created`,
+  `status_changed`, `locker_assigned`, `locker_unassigned`, `door_opened`, `door_closed`, `alert`),
+  `source` (`student_form`, `manager`, `sensor`), `request_id`, `locker_id`, `old_status`, `new_status`,
+  `description`. Os eventos do sensor só são gravados quando a porta muda ou o alerta começa.
+  Apagar um pedido apaga os eventos dele.
 
 ---
 

@@ -11,13 +11,16 @@
 #   Pending -> Rejected
 #   (only Approved requests get a locker; Collected frees the locker)
 
+import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.responses import FileResponse
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -45,6 +48,26 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 def form_page():
     """Single page with the student form."""
     return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+# ---------------------------------------------------------------------------
+# Manager authentication (API key)
+# The Android app sends the header "X-API-Key: <MANAGER_API_KEY from .env>".
+# Open routes (no key): the form page, POST /api/requests and /uplink.
+# ---------------------------------------------------------------------------
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(key: str | None = Security(api_key_header)):
+    expected = os.environ.get("MANAGER_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=503, detail="MANAGER_API_KEY is not configured on the server")
+    if key is None or not secrets.compare_digest(key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+manager_only = [Depends(require_api_key)]
 
 
 class NewRequest(BaseModel):
@@ -83,11 +106,36 @@ def require_status(request, *allowed: str):
         )
 
 
-def set_status(conn, request_id: int, new_status: str):
+def log_event(conn, event_type: str, source: str, request_id: int | None = None,
+              locker_id: int | None = None, old_status: str | None = None,
+              new_status: str | None = None, description: str | None = None):
+    """Writes a row in the history (events). Uses the caller's transaction,
+    so the action and its event are saved together (or neither is)."""
+    conn.execute(
+        text("""
+            INSERT INTO events (event_type, source, request_id, locker_id,
+                                old_status, new_status, description)
+            VALUES (:event_type, :source, :request_id, :locker_id,
+                    :old_status, :new_status, :description)
+        """),
+        {
+            "event_type": event_type, "source": source,
+            "request_id": request_id, "locker_id": locker_id,
+            "old_status": old_status, "new_status": new_status,
+            "description": description,
+        },
+    )
+
+
+def set_status(conn, request, new_status: str):
+    """Changes the request status (manager action) and records it in the history."""
     conn.execute(
         text("UPDATE requests SET status = :status WHERE id = :id"),
-        {"status": new_status, "id": request_id},
+        {"status": new_status, "id": request["id"]},
     )
+    log_event(conn, "status_changed", "manager",
+              request_id=request["id"], locker_id=request["locker_id"],
+              old_status=request["status"], new_status=new_status)
 
 
 def free_locker(conn, locker_id: int | None):
@@ -102,7 +150,7 @@ def free_locker(conn, locker_id: int | None):
 # DASHBOARD
 # ---------------------------------------------------------------------------
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", dependencies=manager_only)
 def dashboard():
     with engine.connect() as conn:
         requests = conn.execute(text("""
@@ -138,7 +186,7 @@ def dashboard():
 # REQUESTS
 # ---------------------------------------------------------------------------
 
-@app.get("/api/requests")
+@app.get("/api/requests", dependencies=manager_only)
 def list_requests(status: RequestStatus | None = None, search: str | None = None):
     """Lists the requests (oldest first), filtered by status and searchable
     by student name, student number or request number."""
@@ -184,10 +232,13 @@ def create_request(new: NewRequest):
             },
         ).mappings().one()
 
+        log_event(conn, "request_created", "student_form",
+                  request_id=row["id"], new_status="Pending")
+
     return dict(row)
 
 
-@app.get("/api/requests/{request_id}")
+@app.get("/api/requests/{request_id}", dependencies=manager_only)
 def request_detail(request_id: int):
     """Request detail, including the state of the assigned locker (if any)."""
     with engine.connect() as conn:
@@ -209,23 +260,25 @@ def request_detail(request_id: int):
     return request
 
 
-@app.put("/api/requests/{request_id}/approve")
+@app.put("/api/requests/{request_id}/approve", dependencies=manager_only)
 def approve(request_id: int):
     with engine.begin() as conn:
-        require_status(get_request(conn, request_id), "Pending")
-        set_status(conn, request_id, "Approved")
+        request = get_request(conn, request_id)
+        require_status(request, "Pending")
+        set_status(conn, request, "Approved")
     return {"success": True}
 
 
-@app.put("/api/requests/{request_id}/reject")
+@app.put("/api/requests/{request_id}/reject", dependencies=manager_only)
 def reject(request_id: int):
     with engine.begin() as conn:
-        require_status(get_request(conn, request_id), "Pending")
-        set_status(conn, request_id, "Rejected")
+        request = get_request(conn, request_id)
+        require_status(request, "Pending")
+        set_status(conn, request, "Rejected")
     return {"success": True}
 
 
-@app.put("/api/requests/{request_id}/deposited")
+@app.put("/api/requests/{request_id}/deposited", dependencies=manager_only)
 def deposited(request_id: int):
     """The item was placed in the assigned locker."""
     with engine.begin() as conn:
@@ -236,23 +289,23 @@ def deposited(request_id: int):
                 status_code=409,
                 detail="Assign a locker to the request before marking it as deposited",
             )
-        set_status(conn, request_id, "Deposited")
+        set_status(conn, request, "Deposited")
     return {"success": True}
 
 
-@app.put("/api/requests/{request_id}/collected")
+@app.put("/api/requests/{request_id}/collected", dependencies=manager_only)
 def collected(request_id: int):
     """The student collected the item: the locker becomes free.
     The locker_id stays on the request as history."""
     with engine.begin() as conn:
         request = get_request(conn, request_id)
         require_status(request, "Deposited")
-        set_status(conn, request_id, "Collected")
+        set_status(conn, request, "Collected")
         free_locker(conn, request["locker_id"])
     return {"success": True}
 
 
-@app.put("/api/requests/{request_id}/locker/{locker_id}")
+@app.put("/api/requests/{request_id}/locker/{locker_id}", dependencies=manager_only)
 def assign_locker(request_id: int, locker_id: int):
     """Assigns (or swaps) the locker of an Approved request."""
     with engine.begin() as conn:
@@ -289,10 +342,16 @@ def assign_locker(request_id: int, locker_id: int):
             {"locker": locker_id, "id": request_id},
         )
 
+        previous = request["locker_id"]
+        log_event(conn, "locker_assigned", "manager",
+                  request_id=request_id, locker_id=locker_id,
+                  description=(f"Locker {previous} swapped for locker {locker_id}"
+                               if previous is not None else None))
+
     return {"success": True}
 
 
-@app.put("/api/requests/{request_id}/unassign")
+@app.put("/api/requests/{request_id}/unassign", dependencies=manager_only)
 def unassign_locker(request_id: int):
     """Removes the locker from an Approved request (before the deposit)."""
     with engine.begin() as conn:
@@ -304,6 +363,10 @@ def unassign_locker(request_id: int):
             text("UPDATE requests SET locker_id = NULL WHERE id = :id"),
             {"id": request_id},
         )
+
+        if request["locker_id"] is not None:
+            log_event(conn, "locker_unassigned", "manager",
+                      request_id=request_id, locker_id=request["locker_id"])
 
     return {"success": True}
 
@@ -333,7 +396,7 @@ SQL_LOCKERS = """
 """
 
 
-@app.get("/api/lockers")
+@app.get("/api/lockers", dependencies=manager_only)
 def list_lockers(status: LockerFilter | None = None):
     """All lockers, with an optional filter: free, occupied or alert."""
     sql = SQL_LOCKERS
@@ -351,13 +414,13 @@ def list_lockers(status: LockerFilter | None = None):
     return [dict(row) for row in rows]
 
 
-@app.get("/api/lockers/free")
+@app.get("/api/lockers/free", dependencies=manager_only)
 def free_lockers():
     """For the app's "Assign locker" dialog."""
     return list_lockers("free")
 
 
-@app.get("/api/lockers/{locker_id}")
+@app.get("/api/lockers/{locker_id}", dependencies=manager_only)
 def locker_detail(locker_id: int):
     with engine.connect() as conn:
         locker = conn.execute(
@@ -383,6 +446,41 @@ def locker_detail(locker_id: int):
     return result
 
 
+SQL_EVENTS = """
+    SELECT id, event_date, event_type, source, request_id, locker_id,
+           old_status, new_status, description
+    FROM events
+"""
+
+
+@app.get("/api/requests/{request_id}/events", dependencies=manager_only)
+def request_events(request_id: int):
+    """History of a request, oldest first."""
+    with engine.connect() as conn:
+        get_request(conn, request_id)   # 404 if it does not exist
+        rows = conn.execute(
+            text(SQL_EVENTS + " WHERE request_id = :id ORDER BY event_date ASC, id ASC"),
+            {"id": request_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/lockers/{locker_id}/events", dependencies=manager_only)
+def locker_events(locker_id: int, limit: int = Query(50, ge=1, le=500)):
+    """History of a locker (manager actions and sensor events), newest first."""
+    with engine.connect() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM lockers WHERE id = :id"), {"id": locker_id}
+        ).first()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Locker not found")
+        rows = conn.execute(
+            text(SQL_EVENTS + " WHERE locker_id = :id ORDER BY event_date DESC, id DESC LIMIT :limit"),
+            {"id": locker_id, "limit": limit},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # XIAO ESP32 (locker events: Wi-Fi or TTN over MQTT)
 # The payload keys/values (porta, trinco, ABERTA...) are defined by the
@@ -402,8 +500,22 @@ def process_uplink(data: dict):
         line += "  <-- ALERT: forced opening!"
     print(line, flush=True)
 
+    door_open = state["porta"] == "ABERTA"
+    alert = bool(state.get("alerta", False))
+
     with engine.begin() as conn:
-        result = conn.execute(
+        # Previous state (locked until the end of the transaction), to record
+        # only real changes and not every repeated uplink.
+        locker = conn.execute(
+            text("SELECT id, door_open, alert FROM lockers WHERE dev_eui = :dev_eui FOR UPDATE"),
+            {"dev_eui": dev_eui},
+        ).mappings().first()
+
+        if locker is None:
+            print(f"  (no locker linked to device {dev_eui})", flush=True)
+            return {"error": f"No locker linked to device {dev_eui}"}
+
+        conn.execute(
             text("""
                 UPDATE lockers
                 SET door_open = :door_open,
@@ -411,20 +523,37 @@ def process_uplink(data: dict):
                     alert = :alert,
                     has_item = :has_item,
                     last_communication = CURRENT_TIMESTAMP
-                WHERE dev_eui = :dev_eui
+                WHERE id = :id
             """),
             {
-                "door_open": state["porta"] == "ABERTA",
+                "door_open": door_open,
                 "locked": state["trinco"] == "TRANCADO",
-                "alert": state.get("alerta", False),
+                "alert": alert,
                 "has_item": state.get("ocupado", False),
-                "dev_eui": dev_eui,
+                "id": locker["id"],
             },
         )
 
-    if result.rowcount == 0:
-        print(f"  (no locker linked to device {dev_eui})", flush=True)
-        return {"error": f"No locker linked to device {dev_eui}"}
+        door_changed = locker["door_open"] is not None and door_open != locker["door_open"]
+        alert_started = alert and not locker["alert"]
+
+        if door_changed or alert_started:
+            active_request = conn.execute(
+                text("""
+                    SELECT id FROM requests
+                    WHERE locker_id = :id AND status IN ('Approved', 'Deposited')
+                    LIMIT 1
+                """),
+                {"id": locker["id"]},
+            ).scalar()
+
+            if door_changed:
+                log_event(conn, "door_opened" if door_open else "door_closed", "sensor",
+                          request_id=active_request, locker_id=locker["id"])
+            if alert_started:
+                log_event(conn, "alert", "sensor",
+                          request_id=active_request, locker_id=locker["id"],
+                          description="Forced opening detected")
 
     return {"success": True}
 

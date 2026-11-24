@@ -14,7 +14,7 @@ CREATE TABLE lockers (
 
 CREATE TABLE students (
     id SERIAL PRIMARY KEY,
-    student_number VARCHAR(20),
+    student_number VARCHAR(20) UNIQUE,
     name VARCHAR(100),
     nfc_uid VARCHAR(50)
 );
@@ -29,12 +29,21 @@ CREATE TABLE requests (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- History of requests and lockers (written by the API on every action / sensor change)
 CREATE TABLE events (
-    id SERIAL PRIMARY KEY,
-    request_id INTEGER REFERENCES requests(id),
-    description TEXT,
-    event_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id          SERIAL PRIMARY KEY,
+    event_date  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    event_type  VARCHAR(30) NOT NULL,  -- request_created, status_changed, locker_assigned,
+                                       -- locker_unassigned, door_opened, door_closed, alert
+    source      VARCHAR(20) NOT NULL,  -- student_form, manager, sensor
+    request_id  INTEGER REFERENCES requests(id) ON DELETE CASCADE,
+    locker_id   INTEGER REFERENCES lockers(id)  ON DELETE SET NULL,
+    old_status  VARCHAR(20),           -- only in status_changed
+    new_status  VARCHAR(20),
+    description TEXT                   -- optional readable text
 );
+CREATE INDEX events_request_id_idx ON events (request_id);
+CREATE INDEX events_locker_id_idx  ON events (locker_id);
 
 -- Example lockers (locker 1 is the XIAO in ABP)
 INSERT INTO lockers (dev_eui) VALUES ('70B3D57ED0079EC6');
