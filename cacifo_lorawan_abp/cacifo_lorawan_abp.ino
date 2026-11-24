@@ -20,6 +20,13 @@ LoRaWANNode node(&radio, &EU868);
 // Pinos e ângulos
 const int PIN_PORTA = D0;
 const int PIN_SERVO = D1;
+
+const int PIN_TRIG = D2;
+const int PIN_ECHO = D3;
+const int DISTANCIA_LIMITE_CM = 15; // Objeto a menos de 15 cm = CACIFO OCUPADO
+
+bool ocupado = false;
+
 const int ANG_TRANCADO    = 0;
 const int ANG_DESTRANCADO = 90;
 
@@ -79,6 +86,26 @@ void servoMover(int angulo) {
 #endif
 }
 
+// ---------- Sensor Ultrassónico (Ocupação) ----------
+float lerDistanciaCM() {
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+
+  long duracao = pulseIn(PIN_ECHO, HIGH, 30000); // timeout de 30ms (~5 metros)
+  if (duracao == 0) return 999.0; // sem eco / fora de alcance
+
+  return duracao * 0.0343 / 2.0; // converte tempo em cm
+}
+
+bool verificarOcupacao() {
+  float dist = lerDistanciaCM();
+  // Se detetar algo mais perto do que o fundo do cacifo, tem encomenda
+  return (dist > 0 && dist < DISTANCIA_LIMITE_CM);
+}
+
 // ---------- Porta e trinco ----------
 bool lerPorta() { return digitalRead(PIN_PORTA) == LOW; }
 
@@ -91,6 +118,12 @@ void mostrarEstado() {
     Serial.println("ALERTA: porta aberta com o trinco fechado (abertura forçada?)");
   }
   Serial.flush();
+  ocupado = verificarOcupacao();
+  Serial.print(" | Ocupação: ");
+  Serial.print(ocupado ? "COM MATERIAL" : "VAZIO");
+  Serial.print(" (");
+  Serial.print(lerDistanciaCM());
+  Serial.println(" cm)");
 }
 
 void destrancar() {
@@ -154,6 +187,9 @@ void enviarEstado() {
   if (trancado)     estado |= 0x02;
   if (!portaFechada && trancado) estado |= 0x04;
 
+  ocupado = verificarOcupacao();
+  if (ocupado)      estado |= 0x08; // Bit 3 = Ocupado
+
   Serial.print("A enviar para o TTN: 0x0");
   Serial.println(estado, HEX);
   Serial.flush();
@@ -200,6 +236,8 @@ void setup() {
   escrever("=== Cacifo LoRaWAN (ABP) ===");
 
   pinMode(PIN_PORTA, INPUT_PULLUP);
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
   portaFechada = lerPorta();
   ultimaLeitura = portaFechada;
 
