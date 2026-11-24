@@ -12,22 +12,27 @@ CREATE TABLE lockers (
     last_communication TIMESTAMP NULL
 );
 
+-- Students: registered automatically by the form (POST /api/requests),
+-- identified by the student number; the name is updated on each new request
 CREATE TABLE students (
     id SERIAL PRIMARY KEY,
-    student_number VARCHAR(20) UNIQUE,
+    student_number VARCHAR(20) UNIQUE
+        CHECK (student_number ~ '^[0-9]{10}$'),     -- YYYYXXXXXX, e.g. 2026100001
     name VARCHAR(100),
     nfc_uid VARCHAR(50)
 );
 
 CREATE TABLE requests (
     id SERIAL PRIMARY KEY,
-    student VARCHAR(100) NOT NULL,
-    student_number VARCHAR(20),
+    student VARCHAR(100) NOT NULL,                  -- name as typed in this request
+    student_number VARCHAR(20)                      -- link to the student (NULL in old requests)
+        REFERENCES students(student_number) ON UPDATE CASCADE,
     material TEXT NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'Pending',  -- Pending, Approved, Rejected, Deposited, Collected
     locker_id INTEGER REFERENCES lockers(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX requests_student_number_idx ON requests (student_number);
 
 -- History of requests and lockers (written by the API on every action / sensor change)
 CREATE TABLE events (
@@ -50,7 +55,8 @@ INSERT INTO lockers (dev_eui) VALUES ('70B3D57ED0079EC6');
 INSERT INTO lockers (dev_eui) VALUES (NULL), (NULL);
 
 -- A test request
-INSERT INTO requests (student, student_number, material) VALUES ('Test Student', '12345', 'Laptop');
+INSERT INTO students (student_number, name) VALUES ('2026100001', 'Test Student');
+INSERT INTO requests (student, student_number, material) VALUES ('Test Student', '2026100001', 'Laptop');
 
 -- Migration from the old Portuguese schema (already applied on Neon):
 -- ALTER TABLE pedidos RENAME TO requests;  ALTER TABLE cacifos RENAME TO lockers;

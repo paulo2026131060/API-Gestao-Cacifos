@@ -142,12 +142,15 @@ function decodeUplink(input) {
 ```
 API-Gestão-Cacifos/
 ├── .venv/
-├── .env            ← DATABASE_URL (e TTN_API_KEY); não vai para o Git
+├── .env            ← DATABASE_URL, TTN_API_KEY e MANAGER_API_KEY; não vai para o Git
 ├── database/       ← tudo o que é da base de dados
 │   ├── connection.py ← ligação à Neon (SQLAlchemy)
 │   ├── schema.sql    ← tabelas lockers, students, requests e events
 │   └── teste_db.py   ← teste rápido da ligação
-├── main.py         ← endpoints + process_uplink
+├── static/         ← formulário do aluno (servido pela API em /)
+│   ├── index.html
+│   └── logo-unips.svg
+├── main.py         ← endpoints, chave de API, histórico (log_event) + process_uplink
 ├── mqtt_ttn.py     ← cliente MQTT do TTN
 └── requirements.txt
 ```
@@ -188,7 +191,7 @@ Pending ──► Approved ──► Deposited ──► Collected
 |---|---|---|
 | GET | `/api/dashboard` | Contadores: pendentes, aprovados, aprovados sem cacifo, depositados, cacifos livres, ocupados e com alerta |
 | GET | `/api/requests?status=&search=` | Lista de pedidos (mais antigos primeiro), com filtro por estado e pesquisa por aluno ou nº |
-| POST | `/api/requests` | Cria um pedido (website). Corpo: `{"student": "...", "student_number": "12345", "material": "..."}` |
+| POST | `/api/requests` | Cria um pedido (website). Corpo: `{"student": "...", "student_number": "2026100001", "material": "..."}` |
 | GET | `/api/requests/{id}` | Detalhe do pedido, com o estado do cacifo atribuído |
 | GET | `/api/requests/{id}/events` | Histórico do pedido (mais antigo primeiro) |
 | PUT | `/api/requests/{id}/approve` · `/reject` | Pending → Approved / Rejected |
@@ -206,9 +209,11 @@ Respostas de erro:
 
 | Código | Significado |
 |---|---|
+| 401 | Falta o cabeçalho `X-API-Key` ou a chave está errada (endpoints do gestor) |
 | 404 | Pedido ou cacifo não existe |
 | 409 | Ação impossível no estado atual (ex.: aprovar um pedido já Rejected, cacifo já ocupado) |
-| 422 | Dados inválidos (ex.: estado desconhecido no filtro, campos em falta no POST) |
+| 422 | Dados inválidos (ex.: estado desconhecido no filtro, campos em falta no POST, nome com números, número de aluno sem 10 dígitos) |
+| 503 | `MANAGER_API_KEY` não está configurada no `.env` do servidor |
 
 Documentação automática e testes: `http://localhost:8000/docs` (botão **Try it out**).
 
@@ -236,8 +241,37 @@ Todos os endpoints `/api/...` exigem o cabeçalho `X-API-Key`, **exceto** `POST 
 ### Formulário do aluno
 
 Com a API a correr, o formulário abre em **`http://localhost:8000/`** (ficheiro `static/index.html`,
-servido pela própria API). Pede nome, número do aluno e material, e envia `POST /api/requests`.
-Noutro dispositivo da mesma rede, usar `http://<IP-do-PC>:8000/`.
+servido pela própria API). Noutro dispositivo da mesma rede, usar `http://<IP-do-PC>:8000/`.
+
+| Campo | Regra (validada no browser **e** na API) |
+|---|---|
+| Nome do aluno | Obrigatório, até 100 caracteres, **sem números** |
+| Número do aluno | Obrigatório, **exatamente 10 dígitos** no formato `YYYYXXXXXX` (ex.: `2026100001`) |
+| Material que pretende | Obrigatório, até 500 caracteres |
+
+Ao enviar (`POST /api/requests`), a API, numa só transação:
+
+1. regista o aluno em `students` pelo número (se já existir, atualiza o nome);
+2. cria o pedido como `Pending`, ligado ao aluno pelo `student_number`;
+3. grava o evento `request_created` no histórico.
+
+O aluno vê "Pedido enviado! Um gestor entrará em contacto brevemente.". A página usa o logo e as
+cores da UNIPS (`#009697`) e a fonte Barlow.
+
+### Histórico (tabela `events`)
+
+Cada ação fica registada automaticamente, na mesma transação da ação:
+
+| Evento | Quando | `source` |
+|---|---|---|
+| `request_created` | Aluno envia o formulário | `student_form` |
+| `status_changed` | Aprovar, rejeitar, depositar, levantar (guarda `old_status` → `new_status`) | `manager` |
+| `locker_assigned` / `locker_unassigned` | Atribuir, trocar ou retirar o cacifo | `manager` |
+| `door_opened` / `door_closed` | A porta muda de estado (uplinks repetidos não geram eventos) | `sensor` |
+| `alert` | Começa um alerta de abertura forçada | `sensor` |
+
+Consultar: `GET /api/requests/{id}/events` e `GET /api/lockers/{id}/events`, ou no Neon
+`SELECT * FROM events ORDER BY id DESC;`. Os pedidos criados antes do histórico não têm eventos.
 
 ### Integração MQTT com o TTN (publish/subscribe)
 
@@ -283,13 +317,32 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 
 - **lockers**: `id`, `occupied` (atribuído a um pedido), `door_open`, `locked`,
   `has_item` (sensor físico), `alert`, `dev_eui`, `last_communication`.
-- **requests**: `id`, `student`, `student_number`, `material`, `status`, `locker_id`, `created_at`.
-- **students**: `id`, `student_number`, `name`, `nfc_uid`.
+- **requests**: `id`, `student`, `student_number` (→ `students.student_number`), `material`, `status`,
+  `locker_id`, `created_at`.
+- **students**: `id`, `student_number` (único, 10 dígitos `YYYYXXXXXX`, ex.: `2026100001`), `name`, `nfc_uid`. O formulário regista o aluno
+  automaticamente pelo número; se o número já existir, reutiliza o aluno e atualiza o nome.
 - **events** (histórico, gravado pela API): `id`, `event_date`, `event_type` (`request_created`,
   `status_changed`, `locker_assigned`, `locker_unassigned`, `door_opened`, `door_closed`, `alert`),
   `source` (`student_form`, `manager`, `sensor`), `request_id`, `locker_id`, `old_status`, `new_status`,
   `description`. Os eventos do sensor só são gravados quando a porta muda ou o alerta começa.
   Apagar um pedido apaga os eventos dele.
+
+Relações e regras na base de dados:
+
+```
+students.student_number ◄── requests.student_number   (ON UPDATE CASCADE)
+lockers.id              ◄── requests.locker_id
+requests.id             ◄── events.request_id          (ON DELETE CASCADE)
+lockers.id              ◄── events.locker_id           (ON DELETE SET NULL)
+```
+
+- O pedido **ativo** de um cacifo é o que tem esse `locker_id` e está `Approved` ou `Deposited`
+  (a tabela `lockers` não guarda o pedido; a API faz o `JOIN` em `GET /api/lockers`).
+- `students.student_number` tem um `CHECK` de 10 dígitos; um aluno com pedidos não pode ser apagado
+  sem apagar primeiro os pedidos.
+- `requests.status` e os booleanos de `lockers` são `NOT NULL`.
+- Ao inserir linhas à mão **com id explícito**, acertar a sequência a seguir:
+  `SELECT setval(pg_get_serial_sequence('requests','id'), (SELECT MAX(id) FROM requests));`
 
 ---
 
@@ -323,6 +376,8 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 | MQTT não liga na universidade | Rede bloqueia portas 8883/1883 | Usar o hotspot do telemóvel (ou webhook + ngrok) |
 | `KeyError: 'DATABASE_URL'` | `.env` dentro da `.venv` | Mover o `.env` para a pasta do projeto |
 | `No module named 'psycopg'` | Connection string `postgresql+psycopg://` | `pip install "psycopg[binary]"` |
+| `duplicate key value violates unique constraint "pedidos_pkey"` ao criar um pedido | Linhas inseridas à mão com id explícito; a sequência do `id` ficou para trás | `setval(...)` para o maior id (ver secção 6) |
+| Endpoints novos dão 404 depois de alterar o `main.py` | O `--reload` do uvicorn nem sempre deteta a alteração (caminho com acentos) | Parar com `Ctrl+C` e arrancar de novo |
 
 ---
 
@@ -331,7 +386,11 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 - [x] `GET /api/lockers` devolver todos os cacifos com estado do hardware (para a app Android).
 - [x] Estados finais do pedido e endpoints `POST /api/requests`, `/deposited`, `/collected`.
 - [ ] App Android: Home, lista e detalhe de pedidos e cacifos.
-- [x] Website com o formulário do aluno (usa `POST /api/requests`).
+- [x] Website com o formulário do aluno (usa `POST /api/requests`), com logo e cores da UNIPS.
+- [x] Base de dados e API em inglês (tabelas, colunas, estados e caminhos).
+- [x] Chave de API (`X-API-Key`) nos endpoints do gestor.
+- [x] Histórico de pedidos e cacifos (tabela `events` + `GET .../events`).
+- [x] Registo de alunos pelo formulário; número de aluno com 10 dígitos (`YYYYXXXXXX`).
 - [ ] Downlink a partir da app (destrancar cacifo via TTN), testado perto da universidade.
 - [ ] Regras automáticas: atualizar o estado do pedido (Depositado/Levantado) a partir dos eventos.
 - [ ] Sensor de ocupação (HC-SR04) e leitor NFC (PN532).
@@ -349,5 +408,8 @@ Drivers: `psycopg[binary]` para `postgresql+psycopg://` (ou `psycopg2-binary` pa
 __pycache__/
 ```
 
-Nunca publicar a connection string da Neon, a API key do TTN nem as chaves LoRaWAN.
+Nunca publicar a connection string da Neon, a API key do TTN, a `MANAGER_API_KEY` nem as chaves
+LoRaWAN. A `MANAGER_API_KEY` vai em texto simples enquanto a API não tiver HTTPS: serve para a rede
+local; ao publicar a API na internet, usar HTTPS. Se a chave vazar, gerar outra, atualizar o `.env`,
+reiniciar a API e atualizar a app.
 As chaves partilhadas durante o desenvolvimento devem ser regeneradas no TTN no fim do projeto.

@@ -37,7 +37,7 @@
     <label for="aluno">Nome do aluno</label>
     <input id="aluno" name="aluno" maxlength="100" pattern="\D+" title="O nome não pode ter números" required>
     <label for="numero">Número do aluno</label>
-    <input id="numero" name="numero" inputmode="numeric" pattern="[0-9]+" maxlength="20" required>
+    <input id="numero" name="numero" inputmode="numeric" pattern="[0-9]{10}" minlength="10" maxlength="10" placeholder="2026100001" title="O número do aluno tem 10 dígitos (ex.: 2026100001)" required>
     <label for="material">Material que pretende</label>
     <textarea id="material" name="material" rows="4" maxlength="500" required></textarea>
     <button type="submit">Enviar pedido</button>

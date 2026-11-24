@@ -72,7 +72,7 @@ manager_only = [Depends(require_api_key)]
 
 class NewRequest(BaseModel):
     student: str = Field(min_length=1, max_length=100, pattern=r"^\D+$")   # no digits
-    student_number: str = Field(min_length=1, max_length=20, pattern=r"^[0-9]+$")
+    student_number: str = Field(pattern=r"^[0-9]{10}$")   # YYYYXXXXXX, e.g. 2026100001
     material: str = Field(min_length=1, max_length=500)
 
 
@@ -217,8 +217,23 @@ def list_requests(status: RequestStatus | None = None, search: str | None = None
 
 @app.post("/api/requests", status_code=201)
 def create_request(new: NewRequest):
-    """Used by the website (student form). A request always starts as Pending."""
+    """Used by the website (student form). A request always starts as Pending.
+    The student is registered in `students` (by student number) or, if they
+    already exist, their name is updated. requests.student_number references
+    students.student_number, so the student must exist before the request."""
+    name = new.student.strip()
+    number = new.student_number.strip()
+
     with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO students (student_number, name)
+                VALUES (:number, :name)
+                ON CONFLICT (student_number) DO UPDATE SET name = EXCLUDED.name
+            """),
+            {"number": number, "name": name},
+        )
+
         row = conn.execute(
             text("""
                 INSERT INTO requests (student, student_number, material, status)
@@ -226,8 +241,8 @@ def create_request(new: NewRequest):
                 RETURNING id, student, student_number, material, status, locker_id, created_at
             """),
             {
-                "student": new.student.strip(),
-                "student_number": new.student_number.strip(),
+                "student": name,
+                "student_number": number,
                 "material": new.material.strip(),
             },
         ).mappings().one()
