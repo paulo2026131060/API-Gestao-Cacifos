@@ -142,9 +142,10 @@ function decodeUplink(input) {
 ```
 API-Gestão-Cacifos/
 ├── .venv/
-├── .env            ← DATABASE_URL, TTN_API_KEY e MANAGER_API_KEY; não vai para o Git
+├── .env            ← DATABASE_URL, TTN_API_KEY, MANAGER_API_KEY, TTN_WEBHOOK_SECRET e NGROK_*; não vai para o Git
 ├── database/       ← tudo o que é da base de dados
-│   ├── connection.py ← ligação à Neon (SQLAlchemy)
+│   ├── connection.py ← ligação à Neon (SQLAlchemy); escolhe TCP ou WebSocket
+│   ├── neon_websocket.py ← proxy local: PostgreSQL dentro de wss:// (porta 443)
 │   ├── schema.sql    ← tabelas lockers, students, requests e events
 │   └── teste_db.py   ← teste rápido da ligação
 ├── static/         ← formulário do aluno (servido pela API em /)
@@ -152,6 +153,7 @@ API-Gestão-Cacifos/
 │   └── logo-unips.svg
 ├── main.py         ← endpoints, chave de API, histórico (log_event) + process_uplink
 ├── mqtt_ttn.py     ← cliente MQTT do TTN
+├── tunel_webhook.py ← túnel ngrok + webhook do TTN (redes sem MQTT)
 └── requirements.txt
 ```
 
@@ -203,6 +205,7 @@ Pending ──► Approved ──► Deposited ──► Collected
 | GET | `/api/lockers/free` | Cacifos livres (diálogo "Atribuir cacifo") |
 | GET | `/api/lockers/{id}` | Detalhe do cacifo, com os últimos 10 pedidos |
 | GET | `/api/lockers/{id}/events?limit=50` | Histórico do cacifo: ações do gestor e eventos do sensor (mais recente primeiro) |
+| POST | `/api/lockers/{id}/unlock` · `/lock` | Destranca / tranca o cacifo por downlink no ChirpStack (entregue após o próximo uplink) |
 | POST | `/uplink` | Recebe um evento do cacifo (modo Wi-Fi ou testes) |
 
 Respostas de erro:
@@ -267,6 +270,7 @@ Cada ação fica registada automaticamente, na mesma transação da ação:
 | `request_created` | Aluno envia o formulário | `student_form` |
 | `status_changed` | Aprovar, rejeitar, depositar, levantar (guarda `old_status` → `new_status`) | `manager` |
 | `locker_assigned` / `locker_unassigned` | Atribuir, trocar ou retirar o cacifo | `manager` |
+| `unlock_requested` / `lock_requested` | Gestor pede para destrancar / trancar (downlink em fila) | `manager` |
 | `door_opened` / `door_closed` | A porta muda de estado (uplinks repetidos não geram eventos) | `sensor` |
 | `alert` | Começa um alerta de abertura forçada | `sensor` |
 
@@ -290,6 +294,95 @@ TTN publica → paho-mqtt → ao_receber() [mqtt_ttn.py] → process_uplink() [m
 
 O endpoint `/uplink` usa a mesma função `process_uplink`, por isso Wi-Fi e LoRaWAN atualizam a
 base de dados da mesma forma. O cacifo é identificado pelo `dev_eui`.
+
+Se a rede bloquear a porta 8883, a API mostra
+`[MQTT] Não foi possível ligar ao TTN (...)` e continua a tentar em segundo plano.
+
+### Integração MQTT com o ChirpStack do IPS
+
+O IPS tem um servidor LoRaWAN próprio (ChirpStack). A API liga-se ao broker MQTT dele **ao mesmo
+tempo** que ao TTN (`mqtt_chirpstack.py`), por isso os dois funcionam em paralelo. Os uplinks do
+ChirpStack (v4 ou v3) são convertidos para o formato do TTN e passam pelo mesmo `process_uplink`.
+
+Configuração no `.env` (sem `CHIRPSTACK_MQTT_HOST` a integração fica desligada):
+
+```
+CHIRPSTACK_MQTT_HOST=...          # endereço do broker MQTT do ChirpStack do IPS
+CHIRPSTACK_MQTT_PORT=1883         # 8883 se o broker usar TLS
+CHIRPSTACK_MQTT_TLS=false
+CHIRPSTACK_MQTT_USER=...          # se o broker pedir autenticação
+CHIRPSTACK_MQTT_PASSWORD=...
+CHIRPSTACK_MQTT_TOPIC=application/<ID-da-application>/device/+/event/up
+```
+
+No ChirpStack:
+
+- Criar o **device profile** (região EU868, versão LoRaWAN e ABP/OTAA iguais ao firmware) e, em
+  **Codec**, escolher *JavaScript functions* e colar o mesmo `decodeUplink` da secção 4.
+  Sem codec, os uplinks chegam sem `object` e a API ignora-os.
+- Criar a **application** e o **device** com o DevEUI do XIAO; o cacifo é encontrado pelo
+  `lockers.dev_eui` (a API converte o DevEUI para maiúsculas).
+
+No arranque deve aparecer `[ChirpStack] Ligado a ... A subscrever ...` e, a cada uplink,
+`[ChirpStack] Uplink em application/.../event/up`.
+
+#### Trancar / destrancar (downlink)
+
+`POST /api/lockers/{id}/unlock` e `/lock` (com `X-API-Key`) publicam no tópico
+`application/<ID>/device/<deveui>/command/down` um downlink no FPort 1 (`01` = destrancar,
+`00` = trancar; `data` em base64: `AQ==` / `AA==`). O ID da application vem do
+`CHIRPSTACK_MQTT_TOPIC` (ou de `CHIRPSTACK_APPLICATION_ID`).
+
+- O XIAO é **classe A**: o comando fica na fila do ChirpStack e só é entregue **logo a seguir ao
+  próximo uplink** do cacifo. O novo estado do trinco chega nesse uplink (`locked` em
+  `GET /api/lockers/{id}`).
+- Cada pedido fica no histórico (`unlock_requested` / `lock_requested`).
+- Respostas: **404** cacifo inexistente, **409** cacifo sem `dev_eui`, **503** sem ligação ao
+  broker do ChirpStack (integração desligada ou rede a bloquear a 1883).
+- O broker pode aceitar a publicação sem ter permissão para ela (o MQTT não avisa): confirmar na
+  consola, no device → **Queue**, se o downlink aparece.
+
+### Redes que bloqueiam portas (ex.: rede da universidade)
+
+Na rede da universidade só passa HTTPS (porta 443): o MQTT (8883/1883), o PostgreSQL (5432)
+e o túnel do Cloudflare (7844) estão bloqueados. A API contorna isto assim:
+
+**Base de dados → WebSocket (automático).** Ao arrancar, `database/connection.py` testa a porta
+5432. Se estiver bloqueada, mostra
+`[DB] Porta 5432 indisponível: ligação à Neon por WebSocket (wss://, porta 443)` e liga-se à Neon
+pelo proxy WebSocket da própria Neon (`wss://<host>/v2`, o mesmo do driver "serverless"). As
+queries e as transações não mudam. Para forçar um modo: `DATABASE_TRANSPORT=tcp|websocket|auto`
+no `.env`. Nesse modo o `channel_binding` da connection string é ignorado (o TLS é feito pelo
+`wss://`).
+
+**Uplinks do TTN → Webhook + ngrok.** Em vez de a API ir buscar os uplinks por MQTT, o TTN
+envia-os por HTTPS para `POST /ttn/uplink`, através de um túnel ngrok (que só usa a porta 443).
+O endpoint exige o cabeçalho `X-Webhook-Secret` igual a `TTN_WEBHOOK_SECRET` no `.env`
+(sem ele → 401) e ignora mensagens sem `decoded_payload`.
+
+Configurar uma vez:
+
+1. Criar conta grátis em https://dashboard.ngrok.com e instalar: `winget install Ngrok.Ngrok`.
+2. No `.env`:
+
+   ```
+   TTN_WEBHOOK_SECRET=...           # gerar com python -c "import secrets; print(secrets.token_urlsafe(32))"
+   NGROK_AUTHTOKEN=...              # dashboard do ngrok → Your Authtoken
+   NGROK_DOMAIN=xxxx.ngrok-free.app # dashboard do ngrok → Domains (domínio fixo gratuito)
+   ```
+
+3. No TTN: **Integrations → Webhooks → Add webhook → Custom webhook**
+   - Webhook ID `api-cacifos`, formato **JSON**, Base URL `https://<NGROK_DOMAIN>`
+   - Additional headers: `X-Webhook-Secret` = valor de `TTN_WEBHOOK_SECRET`
+   - **Uplink message** ativado, caminho `/ttn/uplink`
+
+   (Opcional: com `TTN_WEBHOOK_API_KEY` no `.env`, uma API key do TTN com permissão para editar as
+   definições da application, o script cria/atualiza o webhook sozinho.)
+
+Usar: arrancar a API e, noutro terminal, `python tunel_webhook.py`. Cada uplink aparece na API
+como `[WEBHOOK] Uplink recebido do TTN`. Se o MQTT e o webhook estiverem ambos ativos (ex.: em
+casa), cada uplink é processado duas vezes, sem problema: os eventos só são gravados quando o
+estado muda.
 
 ---
 
@@ -373,7 +466,10 @@ lockers.id              ◄── events.locker_id           (ON DELETE SET NULL
 | Mensagens perdidas / no limite | SNR entre -10 e -16 dB | SF11, antena **na vertical**, junto a uma janela |
 | Mensagens em falta em SF11 | Duty cycle de 1% | Intervalo mínimo de 70 s e reenvio em caso de erro |
 | XIAO não chega à API | Processo antigo a ouvir na porta 8000 / Firewall | `netstat -ano \| findstr :8000` e `taskkill`; regra de Firewall para a porta 8000 |
-| MQTT não liga na universidade | Rede bloqueia portas 8883/1883 | Usar o hotspot do telemóvel (ou webhook + ngrok) |
+| MQTT não liga na universidade | Rede bloqueia portas 8883/1883 | Webhook do TTN + `tunel_webhook.py` (ngrok, porta 443) |
+| API pendurada na universidade (pedidos sem resposta) | Rede bloqueia a porta 5432 da Neon | Ligação automática por WebSocket (`database/neon_websocket.py`) |
+| `cloudflared` não liga (`Allow outbound TCP on port 7844`) | Rede bloqueia a porta 7844 | Usar ngrok, que só precisa da porta 443 |
+| `channel binding required but not supported` | `channel_binding=require` sem TLS direto no PostgreSQL | O `connection.py` retira-o no modo WebSocket |
 | `KeyError: 'DATABASE_URL'` | `.env` dentro da `.venv` | Mover o `.env` para a pasta do projeto |
 | `No module named 'psycopg'` | Connection string `postgresql+psycopg://` | `pip install "psycopg[binary]"` |
 | `duplicate key value violates unique constraint "pedidos_pkey"` ao criar um pedido | Linhas inseridas à mão com id explícito; a sequência do `id` ficou para trás | `setval(...)` para o maior id (ver secção 6) |

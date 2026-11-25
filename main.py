@@ -3,6 +3,7 @@
 # Start:
 #   python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 #
+#   .\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Simulate a TTN uplink to test the API without the XIAO:
 #   Invoke-RestMethod -Uri http://localhost:8000/uplink -Method Post -ContentType "application/json" -Body '{"end_device_ids":{"device_id":"cacifo-01-abp","dev_eui":"70B3D57ED0079EC6"},"uplink_message":{"decoded_payload":{"porta":"ABERTA","trinco":"DESTRANCADO","alerta":false,"ocupado":false}}}'
 #
@@ -26,6 +27,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from database import engine
+from mqtt_chirpstack import (DownlinkError, enviar_downlink, iniciar_mqtt_chirpstack,
+                             parar_mqtt_chirpstack)
 from mqtt_ttn import iniciar_mqtt, parar_mqtt
 
 
@@ -35,9 +38,11 @@ LockerFilter = Literal["free", "occupied", "alert"]
 
 @asynccontextmanager
 async def lifespan(app):
-    iniciar_mqtt(process_uplink)   # connects to TTN when the API starts
+    iniciar_mqtt(process_uplink)              # connects to TTN when the API starts
+    iniciar_mqtt_chirpstack(process_uplink)   # and to the IPS ChirpStack (if configured in .env)
     yield
-    parar_mqtt()                   # disconnects when the API stops
+    parar_mqtt()                              # disconnects when the API stops
+    parar_mqtt_chirpstack()
 
 
 app = FastAPI(title="Locker Management API", lifespan=lifespan)
@@ -497,6 +502,68 @@ def locker_events(locker_id: int, limit: int = Query(50, ge=1, le=500)):
 
 
 # ---------------------------------------------------------------------------
+# LOCK / UNLOCK (downlink through the IPS ChirpStack)
+# The XIAO is LoRaWAN class A: the command waits in the ChirpStack queue and is
+# delivered right after the next uplink of the locker. The new latch state
+# arrives in that uplink (GET /api/lockers/{id} -> "locked").
+# Firmware: FPort 1, 0x01 = unlock, 0x00 = lock.
+# ---------------------------------------------------------------------------
+
+LATCH_COMMANDS = {
+    "unlock": (b"\x01", "unlock_requested"),
+    "lock":   (b"\x00", "lock_requested"),
+}
+
+
+def send_latch_command(locker_id: int, command: str):
+    payload, event_type = LATCH_COMMANDS[command]
+
+    with engine.connect() as conn:
+        locker = conn.execute(
+            text("SELECT id, dev_eui FROM lockers WHERE id = :id"), {"id": locker_id}
+        ).mappings().first()
+    if locker is None:
+        raise HTTPException(status_code=404, detail="Locker not found")
+    if not locker["dev_eui"]:
+        raise HTTPException(status_code=409, detail="The locker has no device (dev_eui) linked")
+
+    try:
+        enviar_downlink(locker["dev_eui"], payload)
+    except DownlinkError as error:
+        raise HTTPException(status_code=503, detail=f"Could not send the command: {error}")
+
+    with engine.begin() as conn:
+        active_request = conn.execute(
+            text("""
+                SELECT id FROM requests
+                WHERE locker_id = :id AND status IN ('Approved', 'Deposited')
+                LIMIT 1
+            """),
+            {"id": locker_id},
+        ).scalar()
+        log_event(conn, event_type, "manager", request_id=active_request, locker_id=locker_id,
+                  description="Downlink queued in ChirpStack; delivered after the next uplink")
+
+    return {
+        "success": True,
+        "queued": True,
+        "detail": "Command queued: the locker receives it right after its next uplink",
+    }
+
+
+@app.post("/api/lockers/{locker_id}/unlock", dependencies=manager_only)
+def unlock_locker(locker_id: int):
+    """Unlocks the locker latch (servo to 90 degrees)."""
+    return send_latch_command(locker_id, "unlock")
+
+
+@app.post("/api/lockers/{locker_id}/lock", dependencies=manager_only)
+def lock_locker(locker_id: int):
+    """Locks the locker latch (servo to 0 degrees)."""
+    return send_latch_command(locker_id, "lock")
+
+
+# ---------------------------------------------------------------------------
 # XIAO ESP32 (locker events: Wi-Fi or TTN over MQTT)
 # The payload keys/values (porta, trinco, ABERTA...) are defined by the
 # firmware, so they are kept as they are.
@@ -575,4 +642,31 @@ def process_uplink(data: dict):
 #Teste para fazer um uplink simulado sem o XIAO, para testar a API:
 @app.post("/uplink")
 def receive_uplink(data: dict):
+    return process_uplink(data)
+
+
+# ---------------------------------------------------------------------------
+# TTN WEBHOOK (alternative to MQTT on networks that block port 8883)
+# The TTN sends each uplink by HTTPS to this route, through the tunnel
+# (see tunel_webhook.py). The webhook sends the header
+# "X-Webhook-Secret: <TTN_WEBHOOK_SECRET from .env>".
+# ---------------------------------------------------------------------------
+
+webhook_secret_header = APIKeyHeader(name="X-Webhook-Secret", auto_error=False)
+
+
+def require_webhook_secret(key: str | None = Security(webhook_secret_header)):
+    expected = os.environ.get("TTN_WEBHOOK_SECRET")
+    if not expected:
+        raise HTTPException(status_code=503, detail="TTN_WEBHOOK_SECRET is not configured on the server")
+    if key is None or not secrets.compare_digest(key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing webhook secret")
+
+
+@app.post("/ttn/uplink", dependencies=[Depends(require_webhook_secret)], include_in_schema=False)
+def ttn_webhook_uplink(data: dict):
+    # Same filter as the MQTT client: ignore messages without application data
+    if "decoded_payload" not in data.get("uplink_message", {}):
+        return {"ignored": "no decoded_payload"}
+    print("[WEBHOOK] Uplink recebido do TTN", flush=True)
     return process_uplink(data)

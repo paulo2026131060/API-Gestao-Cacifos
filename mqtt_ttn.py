@@ -26,12 +26,24 @@ def iniciar_mqtt(processar_uplink):
     """Liga ao TTN e chama processar_uplink(dados) para cada uplink recebido."""
     global _cliente
 
+    aviso_falha = {"mostrado": False}
+
     def ao_ligar(cliente, userdata, flags, reason_code, properties):
         if reason_code == 0:
+            aviso_falha["mostrado"] = False
             print("[MQTT] Ligado ao TTN. A subscrever os uplinks...", flush=True)
             cliente.subscribe(TOPICO_UPLINKS)
         else:
             print(f"[MQTT] Falha na ligação ao TTN: {reason_code}", flush=True)
+
+    def ao_falhar_ligacao(cliente, userdata):
+        # O servidor nem chegou a responder (rede/firewall). O paho volta a
+        # tentar sozinho; o aviso só aparece uma vez até a ligação resultar.
+        if not aviso_falha["mostrado"]:
+            aviso_falha["mostrado"] = True
+            print(f"[MQTT] Não foi possível ligar ao TTN ({TTN_SERVIDOR}:{TTN_PORTA}). "
+                  "A rede pode estar a bloquear a porta. A tentar de novo em segundo plano...",
+                  flush=True)
 
     def ao_receber(cliente, userdata, msg):
         try:
@@ -48,6 +60,7 @@ def iniciar_mqtt(processar_uplink):
     _cliente.username_pw_set(TTN_UTILIZADOR, TTN_API_KEY)
     _cliente.tls_set()
     _cliente.on_connect = ao_ligar
+    _cliente.on_connect_fail = ao_falhar_ligacao
     _cliente.on_message = ao_receber
 
     _cliente.connect_async(TTN_SERVIDOR, TTN_PORTA)
